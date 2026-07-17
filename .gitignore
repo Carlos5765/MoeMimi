@@ -13,6 +13,14 @@ dist-ssr
 *.local
 *.tsbuildinfo
 
+# Portable runtime data (settings and user-created pets)
+/data/
+
+# Local environment variables
+.env
+.env.*
+!.env.example
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

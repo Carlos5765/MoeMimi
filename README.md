@@ -29,22 +29,23 @@ cargo check --manifest-path src-tauri\Cargo.toml
 
 ## 数据位置
 
-应用配置由 Tauri Store 保存为应用数据目录中的 `app-config.json`。桌宠资源保存在：
+MoeMimi 使用便携存储。开发运行时，配置和桌宠资源位于项目根目录的 `data/`；打包后则位于 `MoeMimi.exe` 同级的 `data/`：
 
 ```text
-<app-data>/pets/<petId>/
-├─ pet.json
-├─ avatar.png
-└─ dialogue.json
+MoeMimi/
+├─ MoeMimi.exe            # 打包后
+└─ data/
+   ├─ app-config.json
+   └─ pets/
+      └─ <petId>/
+         ├─ pet.json
+         ├─ avatar.png
+         └─ dialogue.json
 ```
 
-Windows 上的应用数据目录通常是：
+从旧版本首次切换到便携存储时，如果 `data/` 尚不存在，程序会把 `%APPDATA%\com.moemimi.desktop` 中的现有配置和桌宠复制进便携目录。迁移完成后只读写 `data/`，旧目录仅作为备份保留。完整桌宠文件夹可直接放进 `data/pets/`，重启程序后读取。
 
-```text
-%APPDATA%\com.moemimi.desktop
-```
-
-首次启动只会创建桌宠资源目录，不会自动生成或恢复示例桌宠；用户删除的桌宠不会在重启后重新出现。
+便携目录必须可写，发布时不要把 MoeMimi 放进 `Program Files` 等通常需要管理员权限的目录。用户删除的桌宠不会在重启后重新出现。
 
 ## 启动规则
 

@@ -63,7 +63,8 @@ fn validate_pet_id(pet_id: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_pet_id;
+    use super::{extract_legacy_config, validate_pet_id};
+    use serde_json::json;
 
     #[test]
     fn accepts_unicode_pet_ids() {
@@ -77,16 +78,105 @@ mod tests {
             assert!(validate_pet_id(pet_id).is_err(), "accepted {pet_id}");
         }
     }
+
+    #[test]
+    fn extracts_config_from_legacy_store_document() {
+        let legacy = json!({ "config": { "defaultPet": "simple-mimi", "launch": "pet" } });
+        assert_eq!(
+            extract_legacy_config(legacy),
+            json!({ "defaultPet": "simple-mimi", "launch": "pet" })
+        );
+    }
 }
 
-fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
+fn portable_root_dir() -> Result<PathBuf, String> {
+    #[cfg(debug_assertions)]
+    {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "无法解析项目根目录".to_string())
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        std::env::current_exe()
+            .map_err(|error| format!("无法解析程序路径：{error}"))?
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "无法解析程序所在目录".to_string())
+    }
+}
+
+fn copy_directory_contents(source: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir_all(target).map_err(|error| format!("无法创建迁移目录：{error}"))?;
+    for entry in fs::read_dir(source).map_err(|error| format!("无法读取旧数据：{error}"))? {
+        let entry = entry.map_err(|error| format!("无法读取旧数据项：{error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("无法识别旧数据项：{error}"))?;
+        let destination = target.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_directory_contents(&entry.path(), &destination)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), destination)
+                .map_err(|error| format!("无法迁移旧数据文件：{error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_legacy_config(document: Value) -> Value {
+    document.get("config").cloned().unwrap_or(document)
+}
+
+fn migrate_legacy_data(app: &AppHandle, target: &Path) -> Result<(), String> {
+    let legacy = app
+        .path()
         .app_data_dir()
-        .map_err(|error| format!("无法解析应用数据目录：{error}"))
+        .map_err(|error| format!("无法解析旧应用数据目录：{error}"))?;
+    if !legacy.is_dir() {
+        return Ok(());
+    }
+
+    let legacy_config = legacy.join("app-config.json");
+    if legacy_config.is_file() {
+        let text = fs::read_to_string(&legacy_config)
+            .map_err(|error| format!("无法读取旧应用配置：{error}"))?;
+        let document: Value = serde_json::from_str(&text)
+            .map_err(|error| format!("旧应用配置不是有效 JSON：{error}"))?;
+        fs::write(
+            target.join("app-config.json"),
+            serde_json::to_vec_pretty(&extract_legacy_config(document))
+                .map_err(|error| format!("无法转换旧应用配置：{error}"))?,
+        )
+        .map_err(|error| format!("无法迁移应用配置：{error}"))?;
+    }
+
+    let legacy_pets = legacy.join("pets");
+    if legacy_pets.is_dir() {
+        copy_directory_contents(&legacy_pets, &target.join("pets"))?;
+    }
+    Ok(())
+}
+
+fn portable_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let directory = portable_root_dir()?.join("data");
+    let is_first_use = !directory.exists();
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("无法创建便携数据目录 {}：{error}", directory.display()))?;
+
+    if is_first_use {
+        if let Err(error) = migrate_legacy_data(app, &directory) {
+            let _ = fs::remove_dir_all(&directory);
+            return Err(error);
+        }
+    }
+    Ok(directory)
 }
 
 fn pets_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let directory = app_data_dir(app)?.join("pets");
+    let directory = portable_data_dir(app)?.join("pets");
     fs::create_dir_all(&directory).map_err(|error| format!("无法创建桌宠目录：{error}"))?;
     Ok(directory)
 }
@@ -112,6 +202,28 @@ fn safe_pet_path(app: &AppHandle, pet_id: &str, relative_path: &str) -> Result<P
 fn ensure_pet_storage(app: AppHandle) -> Result<(), String> {
     pets_dir(&app)?;
     Ok(())
+}
+
+#[tauri::command]
+fn read_app_config(app: AppHandle) -> Result<Value, String> {
+    let path = portable_data_dir(&app)?.join("app-config.json");
+    if !path.is_file() {
+        return Ok(json!({}));
+    }
+    let text =
+        fs::read_to_string(path).map_err(|error| format!("无法读取便携应用配置：{error}"))?;
+    serde_json::from_str(&text).map_err(|error| format!("应用配置不是有效 JSON：{error}"))
+}
+
+#[tauri::command]
+fn write_app_config(app: AppHandle, config: Value) -> Result<(), String> {
+    if !config.is_object() {
+        return Err("应用配置必须是 JSON 对象".into());
+    }
+    let path = portable_data_dir(&app)?.join("app-config.json");
+    let bytes = serde_json::to_vec_pretty(&config)
+        .map_err(|error| format!("无法序列化应用配置：{error}"))?;
+    fs::write(path, bytes).map_err(|error| format!("无法保存便携应用配置：{error}"))
 }
 
 #[tauri::command]
@@ -373,7 +485,6 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             let _ = show_main(app);
         }))
-        .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .args(["--autostart"])
@@ -382,6 +493,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             ensure_pet_storage,
+            read_app_config,
+            write_app_config,
             list_pet_ids,
             pet_file_exists,
             read_pet_text,

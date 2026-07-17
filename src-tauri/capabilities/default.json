@@ -9,7 +9,6 @@
     "core:window:allow-set-position",
     "core:window:allow-set-size",
     "opener:default",
-    "store:default",
     "autostart:default"
   ]
 }
